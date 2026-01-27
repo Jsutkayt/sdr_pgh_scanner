@@ -1,19 +1,28 @@
 # config.yaml - Configuration for RadioTranscriber
 # Edit values as needed for your feed. Use quotes for strings with special chars.
 
-credentials:
-  username: "your_broadcastify_username"  # Your Broadcastify username
-  password: "your_broadcastify_password"  # Your Broadcastify password
+# Deleted credentials section (username and password)
+# Deleted feed specific section (Feed #, description, and outout folder)
+
+sdr:
+  frequencies:
+  frequency: 453400000       # Replace with YOUR frequency 1 in Hz
+  description: "Pgh Fire Dispatch"   # Name it whatever you want
+  modulation: "nfm"
+  sample_rate: 12000
+  squelch: 60
+  gain: -1
+  ppm: 0
 
 feed_specific:
-  feed_number: 46018                  # Broadcastify feed ID; sane: your specific feed number
-  description: "Belchertown"          # Human-readable name for log files
-  output_folder: "46018_Belchertown/" # Path to save logs; relative or absolute; creates if missing
+  description: "Pgh_Fire"
+  output_folder: "Pgh_Fire_SDR/"
+
 
 vad_and_silence:
-  vad_aggressiveness: 3               # VAD sensitivity: 0=least aggressive (more false positives), 3=most (misses quiet speech)
-  min_speech_seconds: 2.0             # Min audio length to transcribe; shorter skipped
-  silence_limit: 2.0                  # Seconds of silence to end recording
+  vad_aggressiveness: 1              # VAD sensitivity: 0=least aggressive (more false positives), 3=most (misses quiet speech)
+  min_speech_seconds: 1.0             # Min audio length to transcribe; shorter skipped
+  silence_limit: 1.5                  # Seconds of silence to end recording
 
 tuning:
   model_size: "large-v3"              # Whisper model: tiny/base/small/medium/large/large-v3/turbo

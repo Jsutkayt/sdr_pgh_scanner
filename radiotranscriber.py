@@ -22,10 +22,14 @@ with open("config.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 # Extract config values
-USERNAME = config["credentials"]["username"]
-PASSWORD = config["credentials"]["password"]
-FEED_NUMBER = config["feed_specific"]["feed_number"]
-FEED_DESCRIPTION = config["feed_specific"]["description"]
+SDR_FREQUENCY = config["sdr"]["frequency"]
+SDR_DESCRIPTION = config["sdr"]["description"]
+SDR_MODULATION = config["sdr"]["modulation"]
+SDR_SAMPLE_RATE = config["sdr"]["sample_rate"]
+SDR_SQUELCH = config["sdr"]["squelch"]
+SDR_GAIN = config["sdr"]["gain"]
+SDR_PPM = config["sdr"]["ppm"]
+FEED_DESCRIPTION = SDR_DESCRIPTION
 OUTPUT_FOLDER = config["feed_specific"]["output_folder"]
 
 VAD_AGGRESSIVENESS = config["vad_and_silence"]["vad_aggressiveness"]
@@ -47,7 +51,6 @@ UNIT_PATTERN = config["post_generation_cleanup"]["unit_normalization"]["pattern"
 UNIT_PREFIX = config["post_generation_cleanup"]["unit_normalization"]["prefix"]
 
 # --- SETTINGS ---
-STREAM_URL = f"http://{USERNAME}:{PASSWORD}@audio.broadcastify.com/{FEED_NUMBER}.mp3"
 SAMPLE_RATE = 16000
 CHUNK_BYTES = 8192
 IDLE_THRESHOLD_SECONDS = 600
@@ -76,8 +79,9 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 model = whisper.load_model(MODEL_SIZE).to(device)
 print(f"Model loaded on {device}")
 
-redacted_url = f"http://{USERNAME}:********@audio.broadcastify.com/{FEED_NUMBER}.mp3"
-print(f"Streaming {FEED_DESCRIPTION} feed ({FEED_NUMBER}) from: {redacted_url}")
+print(f"Streaming {FEED_DESCRIPTION} from RTL-SDR")
+print(f"   Frequency: {SDR_FREQUENCY / 1e6:.4f} MHz")
+print(f"   Modulation: {SDR_MODULATION.upper()}, Gain: {SDR_GAIN}")
 print("   Press 'Q' to quit cleanly")
 
 last_activity_time = time.time()
@@ -185,19 +189,57 @@ if WHISPER_DEBUG:
         print(f"[whisper-debug] could not activate instrumentation: {_e}")
 # --- END: Whisper beam-search debug instrumentation ---
 
-def get_ffmpeg_stream(url):
+def get_sdr_stream(frequency, sample_rate_in, modulation, squelch, gain, ppm):
+    """
+    Stream audio from RTL-SDR using rtl_fm
+    """
+    # Build rtl_fm command
     command = [
-        'ffmpeg',
-        '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
-        '-i', url,
-        '-f', 's16le',
-        '-acodec', 'pcm_s16le',
-        '-ar', str(SAMPLE_RATE),
-        '-ac', '1',
-        '-loglevel', 'quiet',
+        'rtl_fm',
+        '-f', str(frequency),
+        '-M', modulation,
+        '-s', str(sample_rate_in),
+        '-g', str(gain),
+        '-p', str(ppm),
+    ]
+    
+    # Add squelch if specified
+    if squelch > 0:
+        command.extend(['-l', str(squelch)])
+    
+    # Output to stdout
+    command.append('-')
+    
+    # Start rtl_fm
+    rtl_process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    
+    # Pipe through sox to resample to 16kHz for Whisper
+    sox_command = [
+        'sox',
+        '-t', 'raw',
+        '-r', str(sample_rate_in),
+        '-e', 'signed',
+        '-b', '16',
+        '-c', '1',
+        '-',
+        '-t', 'raw',
+        '-r', '16000',  # Whisper needs 16kHz
+        '-e', 'signed',
+        '-b', '16',
+        '-c', '1',
         '-'
     ]
-    return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    
+    sox_process = subprocess.Popen(
+        sox_command,
+        stdin=rtl_process.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL
+    )
+    
+    rtl_process.stdout.close()  # Allow rtl_fm to receive SIGPIPE if sox exits
+    
+    return sox_process
 
 def transcriber_worker(model, device):
     print(f"   [Worker] Transcriber thread started on {device}")
@@ -318,7 +360,7 @@ def transcriber_worker(model, device):
 
 def process_audio():
     global last_activity_time, LOG_FILE, CURRENT_LOG_DATE, filter_state
-    ffmpeg_process = get_ffmpeg_stream(STREAM_URL)
+    sdr_process = get_sdr_stream(SDR_FREQUENCY, SDR_SAMPLE_RATE, SDR_MODULATION, SDR_SQUELCH, SDR_GAIN, SDR_PPM)
     
     worker = threading.Thread(target=transcriber_worker, args=(model, device))
     worker.daemon = True
@@ -338,20 +380,20 @@ def process_audio():
                     print("\nQuit requested — cleaning up...")
                     raise KeyboardInterrupt
 
-            ready, _, _ = select.select([ffmpeg_process.stdout], [], [], 0.5)
+            ready, _, _ = select.select([sdr_process.stdout], [], [], 0.5)
             if ready:
-                raw_bytes = ffmpeg_process.stdout.read(CHUNK_BYTES)
+                raw_bytes = sdr_process.stdout.read(CHUNK_BYTES)
             else:
-                if ffmpeg_process.poll() is not None:
-                    print("ffmpeg process died. Restarting stream...")
-                    ffmpeg_process.kill()
-                    ffmpeg_process = get_ffmpeg_stream(STREAM_URL)
+                if sdr_process.poll() is not None:
+                    print("SDR process died. Restarting stream...")
+                    sdr_process.kill()
+                    sdr_process = get_sdr_stream(SDR_FREQUENCY, SDR_SAMPLE_RATE, SDR_MODULATION, SDR_SQUELCH, SDR_GAIN, SDR_PPM)
                 continue
 
             if not raw_bytes:
                 print("Stream lost (EOF). Reconnecting...")
-                ffmpeg_process.kill()
-                ffmpeg_process = get_ffmpeg_stream(STREAM_URL)
+                sdr_process.kill()
+                sdr_process = get_sdr_stream(SDR_FREQUENCY, SDR_SAMPLE_RATE, SDR_MODULATION, SDR_SQUELCH, SDR_GAIN, SDR_PPM)
                 filter_state = np.zeros((sos.shape[0], 2))
                 continue
 
@@ -442,7 +484,7 @@ def process_audio():
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{stop_timestamp}] [STOPPED] Transcription session ended\n")
         
-        ffmpeg_process.kill()
+        sdr_process.kill()
 
 if __name__ == "__main__":
     process_audio()
