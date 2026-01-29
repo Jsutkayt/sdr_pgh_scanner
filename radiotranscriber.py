@@ -1,40 +1,31 @@
-# https://github.com/Nite01007/RadioTranscriber
-import subprocess
+# Modified RadioTranscriber to process local audio files
+# Based on: https://github.com/Nite01007/RadioTranscriber
 import numpy as np
 import whisper
 import torch
 import datetime
 import time
-import sys
 import queue
 import threading
-import select
 import scipy.signal as signal
 import os
 import gc
 import re
 from collections import Counter
-import webrtcvad
 import yaml
+import soundfile as sf
+from pathlib import Path
 
 # Load configuration
 with open("config.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 # Extract config values
-SDR_FREQUENCY = config["sdr"]["frequency"]
 SDR_DESCRIPTION = config["sdr"]["description"]
-SDR_MODULATION = config["sdr"]["modulation"]
-SDR_SAMPLE_RATE = config["sdr"]["sample_rate"]
-SDR_SQUELCH = config["sdr"]["squelch"]
-SDR_GAIN = config["sdr"]["gain"]
-SDR_PPM = config["sdr"]["ppm"]
 FEED_DESCRIPTION = SDR_DESCRIPTION
 OUTPUT_FOLDER = config["feed_specific"]["output_folder"]
 
-VAD_AGGRESSIVENESS = config["vad_and_silence"]["vad_aggressiveness"]
 MIN_SPEECH_SECONDS = config["vad_and_silence"]["min_speech_seconds"]
-SILENCE_LIMIT = config["vad_and_silence"]["silence_limit"]
 
 MODEL_SIZE = config["tuning"]["model_size"]
 LANGUAGE = config["tuning"]["language"]
@@ -52,9 +43,7 @@ UNIT_PREFIX = config["post_generation_cleanup"]["unit_normalization"]["prefix"]
 
 # --- SETTINGS ---
 SAMPLE_RATE = 16000
-CHUNK_BYTES = 8192
-IDLE_THRESHOLD_SECONDS = 600
-GC_INTERVAL = 100
+RECORDINGS_FOLDER = "recordings"  # Folder containing audio files
 
 BASE_LOG_FILENAME = f"transcription_{FEED_DESCRIPTION}"
 LOG_FILE = os.path.join(OUTPUT_FOLDER, f"{BASE_LOG_FILENAME}_{datetime.date.today()}.log")
@@ -65,11 +54,6 @@ if not os.path.exists(LOG_FILE):
     open(LOG_FILE, 'a').close()
 
 sos = signal.butter(5, 100 / (SAMPLE_RATE / 2), btype='high', output='sos')
-filter_state = np.zeros((sos.shape[0], 2))
-
-vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
-VAD_FRAME_MS = 30
-VAD_FRAME_BYTES = int(SAMPLE_RATE * (VAD_FRAME_MS / 1000) * 2)
 
 transcription_queue = queue.Queue()
 
@@ -79,179 +63,54 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 model = whisper.load_model(MODEL_SIZE).to(device)
 print(f"Model loaded on {device}")
 
-print(f"Streaming {FEED_DESCRIPTION} from RTL-SDR")
-print(f"   Frequency: {SDR_FREQUENCY / 1e6:.4f} MHz")
-print(f"   Modulation: {SDR_MODULATION.upper()}, Gain: {SDR_GAIN}")
-print("   Press 'Q' to quit cleanly")
+print(f"Processing recordings from '{RECORDINGS_FOLDER}' folder")
+print(f"   Feed: {FEED_DESCRIPTION}")
+print(f"   Output: {OUTPUT_FOLDER}")
 
-last_activity_time = time.time()
-
-# --- BEGIN: Whisper beam-search debug instrumentation (with fixed tokenizer) ---
-WHISPER_DEBUG = os.getenv("WHISPER_DEBUG", "0") == "1"
-
-if WHISPER_DEBUG:
+def load_audio_file(filepath):
+    """
+    Load an audio file and convert to 16kHz mono float32
+    Supports: WAV, MP3, FLAC, OGG, M4A
+    """
     try:
-        from whisper.decoding import BeamSearchDecoder
-
-        _ORIG_UPDATE = BeamSearchDecoder.update
-        _ORIG_FINALIZE = BeamSearchDecoder.finalize
-
-        def _format_tokens(token_list):
-            if len(token_list) <= 12:
-                return token_list
-            return token_list[:3] + ["…"] + token_list[-8:]
-
-        def _decode_tokens(tokenizer, token_list):
-            try:
-                return tokenizer.decode(token_list)
-            except Exception:
-                return "<decode-error>"
-
-        def _get_tokenizer(self):
-            """Robust tokenizer retrieval across Whisper versions."""
-            tokenizer = None
-            if hasattr(self, "inference") and self.inference is not None:
-                tokenizer = getattr(self.inference, "tokenizer", None)
-            if tokenizer is None and hasattr(self, "model"):
-                tokenizer = getattr(self.model, "tokenizer", None)
-            if tokenizer is None:
-                global model
-                tokenizer = getattr(model, "tokenizer", None)
-            return tokenizer
-
-        def _debug_update(self, tokens, logits, sum_logprobs):
-            t0 = time.time()
-            next_tokens, completed = _ORIG_UPDATE(self, tokens, logits, sum_logprobs)
-            dt_ms = int((time.time() - t0) * 1000)
-
-            try:
-                n_total = next_tokens.shape[0]
-                beam_size = self.beam_size
-                n_audio = n_total // beam_size
-
-                tokenizer = _get_tokenizer(self)
-
-                for i in range(n_audio):
-                    print(f"[whisper-debug] audio={i} step_ms={dt_ms} beams={beam_size}")
-                    for j in range(beam_size):
-                        idx = i * beam_size + j
-                        seq = next_tokens[idx].tolist()
-
-                        score = float(sum_logprobs[idx].item() if hasattr(sum_logprobs[idx], "item") else sum_logprobs[idx])
-
-                        decoded = _decode_tokens(tokenizer, seq) if tokenizer else "<no-tokenizer>"
-
-                        print(f"  ├─ beam {j}: score={score:+.3f}")
-                        print(f"      text=\"{decoded}\"")
-                        print(f"      tokens={_format_tokens(seq)}")
-
-                    # Finished sequences
-                    finished_for_audio = (self.finished_sequences or [{}])[i] if self.finished_sequences is not None else {}
-                    if finished_for_audio:
-                        top_finished = sorted(finished_for_audio.items(), key=lambda kv: kv[1], reverse=True)[:min(beam_size, 3)]
-                        print("  └─ finished (top):")
-                        for k, (seq_tuple, s) in enumerate(top_finished):
-                            decoded_fin = _decode_tokens(tokenizer, list(seq_tuple)) if tokenizer else "<no-tokenizer>"
-                            print(f"     [{k}] score={s:+.3f}")
-                            print(f"         text=\"{decoded_fin}\"")
-                            print(f"         tokens={_format_tokens(list(seq_tuple))}")
-
-            except Exception as e:
-                print(f"[whisper-debug] logging error in update: {e}")
-
-            return next_tokens, completed
-
-        def _debug_finalize(self, preceding_tokens, sum_logprobs):
-            try:
-                tokens_groups, scores_groups = _ORIG_FINALIZE(self, preceding_tokens, sum_logprobs)
-                tokenizer = _get_tokenizer(self)
-
-                for i, (tok_group, score_group) in enumerate(zip(tokens_groups, scores_groups)):
-                    print(f"[whisper-debug] FINAL audio={i} candidates={len(tok_group)}")
-                    pairs = sorted(zip(tok_group, score_group), key=lambda kv: kv[1], reverse=True)
-                    for rank, (seq_tensor, score) in enumerate(pairs[:min(len(pairs), 5)]):
-                        seq = seq_tensor.tolist()
-                        decoded = _decode_tokens(tokenizer, seq) if tokenizer else "<no-tokenizer>"
-                        print(f"  #{rank} score={score:+.3f}")
-                        print(f"     text=\"{decoded}\"")
-                        print(f"     tokens={_format_tokens(seq)}")
-            except Exception as e:
-                print(f"[whisper-debug] logging error in finalize: {e}")
-                return _ORIG_FINALIZE(self, preceding_tokens, sum_logprobs)
-
-            return _ORIG_FINALIZE(self, preceding_tokens, sum_logprobs)
-
-        BeamSearchDecoder.update = _debug_update
-        BeamSearchDecoder.finalize = _debug_finalize
-
-        print("[whisper-debug] Beam search instrumentation active (WHISPER_DEBUG=1)")
-    except Exception as _e:
-        print(f"[whisper-debug] could not activate instrumentation: {_e}")
-# --- END: Whisper beam-search debug instrumentation ---
-
-def get_sdr_stream(frequency, sample_rate_in, modulation, squelch, gain, ppm):
-    """
-    Stream audio from RTL-SDR using rtl_fm
-    """
-    # Build rtl_fm command
-    command = [
-        'rtl_fm',
-        '-f', str(frequency),
-        '-M', modulation,
-        '-s', str(sample_rate_in),
-        '-g', str(gain),
-        '-p', str(ppm),
-    ]
-    
-    # Add squelch if specified
-    if squelch > 0:
-        command.extend(['-l', str(squelch)])
-    
-    # Output to stdout
-    command.append('-')
-    
-    # Start rtl_fm
-    rtl_process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    
-    # Pipe through sox to resample to 16kHz for Whisper
-    sox_command = [
-        'sox',
-        '-t', 'raw',
-        '-r', str(sample_rate_in),
-        '-e', 'signed',
-        '-b', '16',
-        '-c', '1',
-        '-',
-        '-t', 'raw',
-        '-r', '16000',  # Whisper needs 16kHz
-        '-e', 'signed',
-        '-b', '16',
-        '-c', '1',
-        '-'
-    ]
-    
-    sox_process = subprocess.Popen(
-        sox_command,
-        stdin=rtl_process.stdout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL
-    )
-    
-    rtl_process.stdout.close()  # Allow rtl_fm to receive SIGPIPE if sox exits
-    
-    return sox_process
+        # Read audio file
+        audio, sr = sf.read(filepath)
+        
+        # Convert stereo to mono if needed
+        if len(audio.shape) > 1:
+            audio = np.mean(audio, axis=1)
+        
+        # Resample to 16kHz if needed
+        if sr != SAMPLE_RATE:
+            from scipy import signal as sp_signal
+            num_samples = int(len(audio) * SAMPLE_RATE / sr)
+            audio = sp_signal.resample(audio, num_samples)
+        
+        # Ensure float32 and normalize
+        audio = audio.astype(np.float32)
+        
+        # Apply high-pass filter
+        audio, _ = signal.sosfilt(sos, audio, zi=np.zeros((sos.shape[0], 2)))
+        
+        return audio
+        
+    except Exception as e:
+        print(f"   Error loading {filepath}: {e}")
+        return None
 
 def transcriber_worker(model, device):
     print(f"   [Worker] Transcriber thread started on {device}")
     
     while True:
         try:
-            timestamp, audio_data = transcription_queue.get()
-            if audio_data is None: 
+            item = transcription_queue.get()
+            if item is None: 
                 break
+            
+            timestamp, audio_data, filename = item
 
             duration = len(audio_data) / SAMPLE_RATE
-            print(f"Transcribing {duration:.1f}s segment...")
+            print(f"Transcribing {filename} ({duration:.1f}s)...")
             transcribe_start = time.time()
             
             result = model.transcribe(
@@ -312,15 +171,14 @@ def transcriber_worker(model, device):
                     text = re.sub(re.escape(spoken), letter, text, flags=re.IGNORECASE)
                     print(f"   (Mapped unit: {original_text} → {text})")
 
-            # Normalize hyphens in unit IDs (e.g., 5-2-A-1 → 52A1)
-            # Targets 52-prefixed units with letters (A,E,L,B,BS,BL) + digits
+            # Normalize hyphens in unit IDs
             def normalize_unit(match):
                 letter = match.group(1).upper()
                 num = match.group(2)
                 return f"{UNIT_PREFIX}{letter}{num}"
             
             text = re.sub(UNIT_PATTERN, normalize_unit, text, flags=re.IGNORECASE)
-            if text != original_text:  # Only log if changed
+            if text != original_text:
                 print(f"   (Normalized units: {original_text} → {text})")
 
             lower_text = text.lower()
@@ -346,7 +204,7 @@ def transcriber_worker(model, device):
             text = re.sub(keywords, lambda m: m.group(0).title(), text, flags=re.I)
 
             if text:
-                output = f"[{timestamp}] ({duration:.1f}s) {text}"
+                output = f"[{timestamp}] ({duration:.1f}s) [{filename}] {text}"
                 print(output)
                 with open(LOG_FILE, "a", encoding="utf-8") as f:
                     f.write(output + "\n")
@@ -358,133 +216,96 @@ def transcriber_worker(model, device):
         except Exception as e:
             print(f"Error in transcriber: {e}")
 
-def process_audio():
-    global last_activity_time, LOG_FILE, CURRENT_LOG_DATE, filter_state
-    sdr_process = get_sdr_stream(SDR_FREQUENCY, SDR_SAMPLE_RATE, SDR_MODULATION, SDR_SQUELCH, SDR_GAIN, SDR_PPM)
+def process_recordings():
+    global LOG_FILE, CURRENT_LOG_DATE
     
+    # Start transcriber worker thread
     worker = threading.Thread(target=transcriber_worker, args=(model, device))
     worker.daemon = True
     worker.start()
     
-    audio_buffer = []
-    is_recording = False
-    silence_counter = 0
-    silence_limit_chunks = int(SILENCE_LIMIT * SAMPLE_RATE * 2 / CHUNK_BYTES)
-    chunk_count = 0
-
+    # Get list of audio files
+    recordings_path = Path(RECORDINGS_FOLDER)
+    if not recordings_path.exists():
+        print(f"Error: '{RECORDINGS_FOLDER}' folder not found!")
+        print(f"Please create the folder and add your audio files.")
+        return
+    
+    # Supported audio formats
+    audio_extensions = ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma']
+    audio_files = []
+    
+    for ext in audio_extensions:
+        audio_files.extend(recordings_path.glob(f'*{ext}'))
+        audio_files.extend(recordings_path.glob(f'*{ext.upper()}'))
+    
+    audio_files = sorted(set(audio_files))  # Remove duplicates and sort
+    
+    if not audio_files:
+        print(f"No audio files found in '{RECORDINGS_FOLDER}'")
+        print(f"Supported formats: {', '.join(audio_extensions)}")
+        return
+    
+    print(f"\nFound {len(audio_files)} audio file(s) to process")
+    print("=" * 60)
+    
+    start_timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"\n[{start_timestamp}] [STARTED] Batch transcription - {len(audio_files)} files\n")
+    
     try:
-        while True:
-            if select.select([sys.stdin], [], [], 0)[0]:
-                key = sys.stdin.read(1).lower()
-                if key == 'q':
-                    print("\nQuit requested — cleaning up...")
-                    raise KeyboardInterrupt
-
-            ready, _, _ = select.select([sdr_process.stdout], [], [], 0.5)
-            if ready:
-                raw_bytes = sdr_process.stdout.read(CHUNK_BYTES)
-            else:
-                if sdr_process.poll() is not None:
-                    print("SDR process died. Restarting stream...")
-                    sdr_process.kill()
-                    sdr_process = get_sdr_stream(SDR_FREQUENCY, SDR_SAMPLE_RATE, SDR_MODULATION, SDR_SQUELCH, SDR_GAIN, SDR_PPM)
-                continue
-
-            if not raw_bytes:
-                print("Stream lost (EOF). Reconnecting...")
-                sdr_process.kill()
-                sdr_process = get_sdr_stream(SDR_FREQUENCY, SDR_SAMPLE_RATE, SDR_MODULATION, SDR_SQUELCH, SDR_GAIN, SDR_PPM)
-                filter_state = np.zeros((sos.shape[0], 2))
-                continue
-
-            audio_chunk = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-
-            audio_chunk, filter_state = signal.sosfilt(sos, audio_chunk, zi=filter_state)
-            audio_chunk = audio_chunk.astype(np.float32)
-
-            # WebRTC VAD
-            audio_int16 = (audio_chunk * 32767).astype(np.int16)
-            is_speech = False
-            for i in range(0, len(audio_int16), VAD_FRAME_BYTES // 2):
-                frame = audio_int16[i:i + VAD_FRAME_BYTES // 2].tobytes()
-                if len(frame) == VAD_FRAME_BYTES:
-                    if vad.is_speech(frame, SAMPLE_RATE):
-                        is_speech = True
-                        break
-
-            current_time = time.time()
-            current_date = datetime.date.today()
+        for idx, filepath in enumerate(audio_files, 1):
+            print(f"\n[{idx}/{len(audio_files)}] Loading: {filepath.name}")
             
-            if current_date != CURRENT_LOG_DATE:
-                rollover_timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-                with open(LOG_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"[{rollover_timestamp}] [ROLLOVER] Day ended, continuing in new log\n")
-                LOG_FILE = os.path.join(OUTPUT_FOLDER, f"{BASE_LOG_FILENAME}_{current_date}.log")
-                os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-                if not os.path.exists(LOG_FILE):
-                    open(LOG_FILE, 'a').close()
-                with open(LOG_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"[{rollover_timestamp}] [STARTED] Transcription session continued - {FEED_DESCRIPTION} feed\n")
-                CURRENT_LOG_DATE = current_date
-                print(f"   [Rollover] Switched to new log: {LOG_FILE}")
-
-            if current_time - last_activity_time > IDLE_THRESHOLD_SECONDS:
-                last_heard = datetime.datetime.fromtimestamp(last_activity_time).strftime("%H:%M:%S")
-                print(f"   [Idle >10 min] Last heard at {last_heard}")
-                last_activity_time = current_time
-
-            if is_speech:
-                if not is_recording:
-                    print("Voice started...")
-                    is_recording = True
-                audio_buffer.append(audio_chunk)
-                silence_counter = 0
-                last_activity_time = current_time
-            else:
-                if is_recording:
-                    audio_buffer.append(audio_chunk)
-                    silence_counter += 1
-
-                    if silence_counter >= silence_limit_chunks:
-                        full_audio = np.concatenate(audio_buffer)
-                        
-                        if len(full_audio) > 0:
-                            percentile_val = np.percentile(np.abs(full_audio), NORMALIZATION_PERCENTILE)
-                            if percentile_val > 0:
-                                full_audio = full_audio / percentile_val
-                                full_audio = np.clip(full_audio, -1.0, 1.0)
-                        
-                        full_audio = full_audio.astype(np.float32)
-
-                        duration = len(full_audio) / SAMPLE_RATE
-                        
-                        if duration >= MIN_SPEECH_SECONDS:
-                            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-                            transcription_queue.put((timestamp, full_audio.copy()))
-                            print(f"   Queued {duration:.1f}s segment for transcription")
-                        else:
-                            print(f"   (Skipping short burst: {duration:.1f}s)")
-                        
-                        audio_buffer = []
-                        is_recording = False
-                        silence_counter = 0
-
-            chunk_count += 1
-            if chunk_count % GC_INTERVAL == 0:
+            # Load audio file
+            audio_data = load_audio_file(str(filepath))
+            
+            if audio_data is None:
+                continue
+            
+            duration = len(audio_data) / SAMPLE_RATE
+            
+            # Skip files that are too short
+            if duration < MIN_SPEECH_SECONDS:
+                print(f"   (Skipping: too short {duration:.1f}s)")
+                continue
+            
+            # Normalize audio
+            if len(audio_data) > 0:
+                percentile_val = np.percentile(np.abs(audio_data), NORMALIZATION_PERCENTILE)
+                if percentile_val > 0:
+                    audio_data = audio_data / percentile_val
+                    audio_data = np.clip(audio_data, -1.0, 1.0)
+            
+            audio_data = audio_data.astype(np.float32)
+            
+            # Queue for transcription
+            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+            transcription_queue.put((timestamp, audio_data.copy(), filepath.name))
+            print(f"   Queued for transcription ({duration:.1f}s)")
+            
+            # Periodic garbage collection
+            if idx % 10 == 0:
                 gc.collect()
-
+        
+        # Wait for all transcriptions to complete
+        print("\n" + "=" * 60)
+        print("Waiting for transcriptions to complete...")
+        transcription_queue.join()
+        
     except KeyboardInterrupt:
-        print("\nStopping transcriptor...")
+        print("\n\nStopping transcriptor...")
     finally:
-        transcription_queue.put((None, None))
+        # Stop worker thread
+        transcription_queue.put(None)
         worker.join()
         
         stop_timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        print(f"[{stop_timestamp}] [STOPPED] Transcription session ended")
+        print(f"\n[{stop_timestamp}] [COMPLETED] Batch transcription finished")
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{stop_timestamp}] [STOPPED] Transcription session ended\n")
+            f.write(f"[{stop_timestamp}] [COMPLETED] Batch transcription finished\n")
         
-        sdr_process.kill()
+        print(f"\nTranscriptions saved to: {LOG_FILE}")
 
 if __name__ == "__main__":
-    process_audio()
+    process_recordings()

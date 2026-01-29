@@ -1,92 +1,15 @@
-# config.yaml - Configuration for RadioTranscriber
-# Edit values as needed for your feed. Use quotes for strings with special chars.
+# Requirements for RadioTranscriber (File-based version)
 
-# Deleted credentials section (username and password)
-# Deleted feed specific section (Feed #, description, and outout folder)
+# Core dependencies
+numpy>=1.21.0
+openai-whisper>=20231117
+torch>=2.0.0
+scipy>=1.7.0
+PyYAML>=6.0
 
-sdr:
-  frequencies:
-  frequency: 453400000       # Replace with YOUR frequency 1 in Hz
-  description: "Pgh Fire Dispatch"   # Name it whatever you want
-  modulation: "nfm"
-  sample_rate: 12000
-  squelch: 60
-  gain: -1
-  ppm: 0
+# Audio file handling
+soundfile>=0.12.0
+librosa>=0.10.0  # Optional, for additional audio format support
 
-feed_specific:
-  description: "Pgh_Fire"
-  output_folder: "Pgh_Fire_SDR/"
-
-
-vad_and_silence:
-  vad_aggressiveness: 1              # VAD sensitivity: 0=least aggressive (more false positives), 3=most (misses quiet speech)
-  min_speech_seconds: 1.0             # Min audio length to transcribe; shorter skipped
-  silence_limit: 1.5                  # Seconds of silence to end recording
-
-tuning:
-  model_size: "large-v3"              # Whisper model: tiny/base/small/medium/large/large-v3/turbo
-  language: "en"                      # Language code
-  initial_prompt: >-                  # Prompt to guide transcription; include common terms; last 224 tokens used
-    Transcript of Belchertown MA Station 52 public safety radio. Agencies: Police (Bravo units), Fire, EMS. Units: 52A1 52A2 52E1 52L1 Brush 4 Bravo 6 Bravo 9 Bravo 13 A1 Squad 1. Locations: Daniel Shays Hwy, Jabez St, Chauncey Walker St, Lord Jeff Apts, Pine Valley, Bondsville, Turkey Hill Rd, North Main St. Hospitals: Baystate Wing, Cooley Dickinson, Baystate Springfield. Common phrases: in quarters, on scene, clear, received, responding, central.
-  beam_size: 5                        # Beams in search; higher=accurate but slow
-  best_of: 5                          # Candidates to sample; higher=better
-  no_speech_threshold: 0.75           # Prob threshold to discard non-speech; higher=more strict; sane: 0.6-0.8
-  normalization: 95                   # Percentile for audio normalization; sane: 90-99
-
-post_generation_cleanup:
-  full_block_phrases:                 # Block entire transcript if contains any; common hallucinations
-    - "CastingWords"
-    - "ESO"
-    - "Rev.com"
-    - "Rev"
-    - "amara.org"
-    - "amara"
-    - "ESA, Inc."
-    - "U.S. Department of"
-    - "Transcripts translated by"
-    - "Transcription Outsourcing"
-    - "Transcription Outsourcing, Inc"
-
-  cutoff_phrases:                     # Truncate after these phrases if found
-    - "We'll be right back"
-    - "We will be right back"
-    - "Thank you for watching"
-    - "Thanks for watching"
-    - "Thank you for your patience"
-    - "Stay tuned"
-    - "Commercial break"
-    - "you're under arrest"
-    - "I'll narrate everything"
-    - "Transcription by"
-    - "Translation by"
-    - "Captions by"
-    - "Subtitle"
-    - "Subtitles"
-
-
-  unit_mapping:                       # Map spoken unit phrases to standard IDs
-    "eight one": "A1"
-    "8 1": "A1"
-    "81": "A1"
-    "eight-one": "A1"
-    "5 2 8 1": "52A1"
-    "five two eight one": "52A1"
-    "52 81": "52A1"
-    "five-two-eight-one": "52A1"
-    "5-2-8-1": "52A1"
-    "52-81": "52A1"
-    "eight two": "A2"
-    "8 2": "A2"
-    "82": "A2"
-    "eight-two": "A2"
-    "5 2 8 2": "52A2"
-    "five two eight two": "52A2"
-    "52 82": "52A2"
-    "five-two-eight-two": "52A2"
-    "5-2-8-2": "52A2"
-    "52-82": "52A2"
-
-  unit_normalization:                 # Regex for unit ID cleanup
-    pattern: "\\b5-?2-?([A-ELB]|BS|BL)-?(\\d+)\\b"  # Pattern to match; escape backslashes in code use
-    prefix: "52"                                      # Prefix for normalized units
+# Original dependencies (if using original script)
+webrtcvad>=2.0.10  # Only needed for live streaming version

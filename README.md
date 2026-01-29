@@ -1,110 +1,154 @@
-# RadioTranscriber
+# RadioTranscriber - Local File Version
 
-**My first ever coding project — please be kind!**  
-I'm **not** a programmer (at all). This tool was built entirely by describing what I wanted to generative AIs, iterating on their suggestions, and testing/debugging over many sessions. My AI buddy says it's proof that AI-assisted development can take a complete beginner surprisingly far. Feedback, issues, and pull requests are **very welcome**!
+This is a modified version of RadioTranscriber that processes pre-recorded audio files instead of streaming from an RTL-SDR device.
 
-A real-time transcription tool for public safety radio feeds (e.g., Broadcastify streams) using OpenAI Whisper (large-v3). Designed for long-running, low-maintenance operation with daily log rotation, robust audio processing, and strong hallucination filtering.
+## Key Changes
 
-**Important note**: This script is **heavily tuned** to the patterns of my local public safety radio feed (Belchertown, MA area). Unit IDs, dispatch phrasing, alert tones, and filters are customized for that system. It works well on similar feeds, but you will likely need to tweak the prompt, VAD settings, or cleanup rules in `config.yaml` to match your local radio style.
+### What's Different:
+1. **Removed SDR streaming** - No longer uses `rtl_fm` or `sox` for live radio capture
+2. **Added file processing** - Reads audio files from a `recordings/` folder
+3. **Batch processing** - Processes all audio files in the folder sequentially
+4. **Multiple format support** - Handles WAV, MP3, FLAC, OGG, M4A, AAC, WMA
+5. **Automatic resampling** - Converts any sample rate to 16kHz for Whisper
+6. **Stereo to mono** - Automatically converts stereo files to mono
 
-## Features
+### What's Kept:
+- All transcription quality settings (Whisper model, beam search, etc.)
+- Post-processing filters (beep detection, unit normalization, hallucination removal)
+- Unit mapping and normalization
+- Logging format and output structure
 
-- Live streaming from authenticated Broadcastify feeds
-- High-pass filtering to reduce low-frequency rumble/static
-- Percentile-based normalization to handle squelch pops without crushing quiet speech
-- WebRTC VAD for reliable speech detection in noisy radio environments
-- Whisper large-v3 transcription with configurable beam search
-- Powerful hallucination guards:
-  - Block full-line credit/caption hallucinations
-  - Truncate common static-induced endings
-  - Replace alert tone or noise hallucinations with `[beeps]` or `[noise]`
-  - Spoken-to-unit-ID mapping and hyphen normalization (fully configurable!)
-- Daily log rollover with clear markers (`[STARTED]`, `[ROLLOVER]`, `[STOPPED]`)
-- Memory management with periodic garbage collection for multi-day runs
-- Centralized configuration via a single, easy-to-edit `config.yaml`
+## Setup
 
-## Requirements
-
-- Python 3.8+
-- ffmpeg (must be in your PATH)
-- A Broadcastify premium account (for direct stream access)
-
-## Installation & Setup
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/Nite01007/RadioTranscriber.git
-   cd RadioTranscriber
-   
-2. Create and activate a virtual environment (recommended):
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-3. Install dependencies:
-   ```bash
-   pip install numpy scipy torch openai-whisper webrtcvad pyyaml
-
-4. Set up configuration
-    - Open `config.yaml.example` in any text editor and fill in your values:
-        - Broadcastify credentials
-        - Feed number and description
-        - Whisper model size, prompt, beam/best-of settings
-        - VAD aggressiveness, min speech length, silence limit
-        - Hallucination block phrases, cutoff phrases, unit mappings, etc.
-    - Save as `config.yaml`
-
-5.  (Recommended) Protect your credentials by adding `config.yaml` to `.gitignore`:
-    - Create or edit the `.gitignore` file in your project root
-    - Add these lines:
-      ```text
-         config.yaml
-         *.log
-      ```
-    - This prevents accidentally committing your Broadcastify username/password or log files
-
-7. Run the transcriber:
-   ```bash
-      python radiotranscriber.py
-   ```
-
-## Output
-
-Transcriptions are saved to daily log files: (e.g. transcription_Belchertown_2025-12-28.log)
-
-Example log entry:  
-```
-[12:44:52] (21.0s) Central Station 52, stand by for the medical — 123 Main Street...
+### 1. Install Dependencies
+```bash
+pip install -r requirements.txt
 ```
 
-## Customization (All in config.yaml)
+### 2. Create Recordings Folder
+```bash
+mkdir recordings
+```
 
-Everything tunable is now in one file — no more editing the main script!
+### 3. Add Your Audio Files
+Place your audio recordings in the `recordings/` folder. Supported formats:
+- WAV
+- MP3
+- FLAC
+- OGG
+- M4A
+- AAC
+- WMA
 
-| Section                  | What You Can Change                                                                 | Examples / Tips                              |
-|--------------------------|-------------------------------------------------------------------------------------|----------------------------------------------|
-| `credentials`            | Broadcastify username/password                                                      | Keep secure! Never commit this file          |
-| `feed_specific`          | Feed number, description, output folder                                             | Output folder auto-created if missing        |
-| `vad_and_silence`        | VAD aggressiveness, min speech seconds, silence limit                               | Higher VAD = fewer false positives on noise  |
-| `tuning`                 | Model size, language, initial prompt, beam size, best-of, no-speech threshold, normalization percentile | Larger model = better accuracy but slower    |
-| `post_generation_cleanup`| Block phrases, cutoff phrases, unit mapping dict, normalization regex/prefix        | Add your local unit phrases here!            |
+### 4. Configure (Optional)
+Edit `config.yaml` to adjust:
+- Whisper model size (default: large-v3)
+- Language (default: en)
+- Post-processing filters
+- Unit mappings for your area
 
-**Tip**: The `initial_prompt` guides Whisper heavily — include your common units, locations, and agencies. Keep it under ~224 tokens for best results.
+## Usage
 
-## Notes
+### Basic Usage
+```bash
+python transcribe_recordings.py
+```
 
-- This tool is for personal, non-commercial use. Respect Broadcastify's terms of service.
-- Runs well on a potato (tested on CPU; GPU optional for faster transcription).
-- Memory usage is stable for multi-day runs thanks to periodic cleanup.
+The script will:
+1. Load all audio files from `recordings/`
+2. Process them one by one
+3. Save transcriptions to the output folder specified in `config.yaml`
 
-## Contributing
+### Output
+Transcriptions are saved to a log file in the format:
+```
+[HH:MM:SS] (duration) [filename] Transcribed text here
+```
 
-This project is beginner-friendly and open to improvements!
-If you adapt it for your own feed:
-- Fork and tweak config.yaml for your local dispatch patterns
-- If your changes (better defaults, new filters, CLI flags) would help others → open a pull request!
-- Issues welcome: bugs, feature ideas, or "it works on my feed now!" success stories
+Example:
+```
+[14:23:45] (12.3s) [dispatch_001.wav] Station 52, respond to 123 Main Street
+[14:24:10] (8.5s) [dispatch_002.wav] 52A1 responding, in route
+```
 
-## License
+## Performance Tips
 
-MIT License — feel free to fork, modify, and share.
+1. **Model Size**: 
+   - `tiny` - Fastest, least accurate
+   - `base` - Fast, decent for clear audio
+   - `small` - Good balance
+   - `medium` - Better quality, slower
+   - `large-v3` - Best quality, slowest (recommended)
+
+2. **GPU Usage**: 
+   - CUDA-enabled GPU highly recommended for large models
+   - CPU processing is very slow for large models
+
+3. **Batch Size**: 
+   - The script processes files sequentially
+   - Garbage collection runs every 10 files
+
+## Troubleshooting
+
+### "No audio files found"
+- Check that your files are in the `recordings/` folder
+- Verify file extensions are supported
+- Check file permissions
+
+### "Error loading file"
+- File may be corrupted
+- Format may not be supported by soundfile
+- Try converting to WAV with: `ffmpeg -i input.mp3 output.wav`
+
+### Poor transcription quality
+- Increase `beam_size` in config.yaml (default: 5, try 10)
+- Increase `best_of` in config.yaml (default: 5, try 10)
+- Use a larger model (large-v3 recommended)
+- Adjust `initial_prompt` to include common terms from your area
+
+### Out of memory
+- Use a smaller model (medium or small)
+- Process fewer files at once
+- Close other applications
+
+## Comparison to Original
+
+| Feature | Original (SDR) | Modified (Files) |
+|---------|---------------|------------------|
+| Input | Live RTL-SDR stream | Pre-recorded audio files |
+| Processing | Real-time | Batch |
+| Dependencies | rtl_fm, sox, webrtcvad | soundfile |
+| VAD | WebRTC VAD | Not needed |
+| Format | Raw SDR IQ data | Common audio formats |
+| Use Case | Live monitoring | Archive processing |
+
+## Configuration Notes
+
+Since you're not using SDR, these config.yaml sections are **ignored**:
+- `sdr.frequency`
+- `sdr.modulation`
+- `sdr.sample_rate`
+- `sdr.squelch`
+- `sdr.gain`
+- `sdr.ppm`
+- `vad_and_silence.vad_aggressiveness`
+- `vad_and_silence.silence_limit`
+
+These are still **used**:
+- `sdr.description` - Used for log naming
+- `feed_specific.output_folder` - Where logs are saved
+- `vad_and_silence.min_speech_seconds` - Minimum file duration to process
+- All `tuning.*` settings
+- All `post_generation_cleanup.*` settings
+
+## Next Steps
+
+1. Test with a small batch of files first
+2. Review transcription quality
+3. Adjust config.yaml settings as needed
+4. Process your full archive
+
+## Support
+
+Based on: https://github.com/Nite01007/RadioTranscriber
+Modified for local file processing
