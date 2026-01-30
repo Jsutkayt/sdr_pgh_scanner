@@ -2,13 +2,7 @@
 # Optimized for Mac CPU processing
 
 sdr:
-  frequency: 453400000       # Your frequency in Hz
   description: "Pgh Fire Dispatch"
-  modulation: "nfm"
-  sample_rate: 12000
-  squelch: 60
-  gain: -1
-  ppm: 0
 
 feed_specific:
   description: "Pgh_Fire"
