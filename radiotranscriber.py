@@ -1,5 +1,4 @@
-# Modified RadioTranscriber to process local audio files
-# Based on: https://github.com/Nite01007/RadioTranscriber
+
 import numpy as np
 import whisper
 import torch
@@ -57,7 +56,8 @@ sos = signal.butter(5, 100 / (SAMPLE_RATE / 2), btype='high', output='sos')
 
 transcription_queue = queue.Queue()
 
-# --- INITIALIZATION ---
+
+# --- INITIALIZATION --- Medium Model Works Best
 print(f"Loading Whisper model '{MODEL_SIZE}'...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = whisper.load_model(MODEL_SIZE).to(device)

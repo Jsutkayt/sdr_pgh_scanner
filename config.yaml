@@ -1,15 +1,88 @@
-# Requirements for RadioTranscriber (File-based version)
+# config.yaml - Configuration for RadioTranscriber
+# Optimized for Mac CPU processing
 
-# Core dependencies
-numpy>=1.21.0
-openai-whisper>=20231117
-torch>=2.0.0
-scipy>=1.7.0
-PyYAML>=6.0
+sdr:
+  frequency: 453400000       # Your frequency in Hz
+  description: "Pgh Fire Dispatch"
+  modulation: "nfm"
+  sample_rate: 12000
+  squelch: 60
+  gain: -1
+  ppm: 0
 
-# Audio file handling
-soundfile>=0.12.0
-librosa>=0.10.0  # Optional, for additional audio format support
+feed_specific:
+  description: "Pgh_Fire"
+  output_folder: "Pgh_Fire_SDR/"
 
-# Original dependencies (if using original script)
-webrtcvad>=2.0.10  # Only needed for live streaming version
+vad_and_silence:
+  vad_aggressiveness: 1              # VAD sensitivity: 0=least aggressive, 3=most
+  min_speech_seconds: 1.0            # Min audio length to transcribe
+  silence_limit: 1.5                 # Seconds of silence to end recording
+
+tuning:
+  model_size: "medium"                 # CHANGED: "base" for Mac speed (was "large-v3")
+  language: "en"
+  initial_prompt: >-
+    Transcript of Pittsburgh Fire Dispatch public safety radio. 
+    Agencies: Fire, EMS. Common phrases: dispatch, central, on scene, 
+    clear, received, responding, engine, ladder, ambulance.
+  beam_size: 1                       # CHANGED: 1 for speed (was 5)
+  best_of: 1                         # CHANGED: 1 for speed (was 5)
+  no_speech_threshold: 0.75
+  normalization: 95
+
+post_generation_cleanup:
+  full_block_phrases:
+    - "CastingWords"
+    - "ESO"
+    - "Rev.com"
+    - "Rev"
+    - "amara.org"
+    - "amara"
+    - "ESA, Inc."
+    - "U.S. Department of"
+    - "Transcripts translated by"
+    - "Transcription Outsourcing"
+    - "Transcription Outsourcing, Inc"
+
+  cutoff_phrases:
+    - "We'll be right back"
+    - "We will be right back"
+    - "Thank you for watching"
+    - "Thanks for watching"
+    - "Thank you for your patience"
+    - "Stay tuned"
+    - "Commercial break"
+    - "you're under arrest"
+    - "I'll narrate everything"
+    - "Transcription by"
+    - "Translation by"
+    - "Captions by"
+    - "Subtitle"
+    - "Subtitles"
+
+  unit_mapping:
+    "eight one": "A1"
+    "8 1": "A1"
+    "81": "A1"
+    "eight-one": "A1"
+    "5 2 8 1": "52A1"
+    "five two eight one": "52A1"
+    "52 81": "52A1"
+    "five-two-eight-one": "52A1"
+    "5-2-8-1": "52A1"
+    "52-81": "52A1"
+    "eight two": "A2"
+    "8 2": "A2"
+    "82": "A2"
+    "eight-two": "A2"
+    "5 2 8 2": "52A2"
+    "five two eight two": "52A2"
+    "52 82": "52A2"
+    "five-two-eight-two": "52A2"
+    "5-2-8-2": "52A2"
+    "52-82": "52A2"
+
+  unit_normalization:
+    pattern: "\\b5-?2-?([A-ELB]|BS|BL)-?(\\d+)\\b"
+    prefix: "52"
