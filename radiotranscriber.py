@@ -14,6 +14,7 @@ from collections import Counter
 import yaml
 import soundfile as sf
 from pathlib import Path
+import json
 
 # Load configuration
 with open("config.yaml", "r", encoding="utf-8") as f:
@@ -25,7 +26,6 @@ OUTPUT_FOLDER = config["feed_specific"]["output_folder"]
 
 MIN_SPEECH_SECONDS = config["vad_and_silence"]["min_speech_seconds"]
 
-MODEL_SIZE = config["tuning"]["model_size"]
 LANGUAGE = config["tuning"]["language"]
 INITIAL_PROMPT = config["tuning"]["initial_prompt"]
 BEAM_SIZE = config["tuning"]["beam_size"]
@@ -42,6 +42,14 @@ UNIT_PREFIX = config["post_generation_cleanup"]["unit_normalization"]["prefix"]
 
 CLI_PATH = os.path.expanduser(config["whisper_backend"]["cli_path"])
 MODEL_PATH = os.path.expanduser(config["whisper_backend"]["model_path"])
+
+if not os.path.exists(CLI_PATH):
+    print(f"Error: Whisper CLI not found at {CLI_PATH}")
+    sys.exit(1)
+if not os.path.exists(MODEL_PATH):
+    print(f"Error: Model not found at {MODEL_PATH}")
+    sys.exit(1)
+
 
 # --- SETTINGS ---
 SAMPLE_RATE = 16000
@@ -60,11 +68,7 @@ sos = signal.butter(5, 100 / (SAMPLE_RATE / 2), btype='high', output='sos')
 transcription_queue = queue.Queue()
 
 
-# --- INITIALIZATION --- Medium Model Works Best
-#print(f"Loading Whisper model '{MODEL_SIZE}'...")
-#device = "cuda" if torch.cuda.is_available() else "cpu"
-#model = whisper.load_model(MODEL_SIZE).to(device)
-#print(f"Model loaded on {device}")
+# --- INITIALIZATION --- 
 
 print(f"Processing recordings from '{RECORDINGS_FOLDER}' folder")
 print(f"   Feed: {FEED_DESCRIPTION}")
@@ -115,23 +119,9 @@ def transcriber_worker():
             duration = len(audio_data) / SAMPLE_RATE
             print(f"Transcribing {filename} ({duration:.1f}s)...")
             transcribe_start = time.time()
-            
-            #result = model.transcribe(
-               # audio_data,
-               # language=LANGUAGE,
-               # fp16=(device == "cuda"),
-               # initial_prompt=INITIAL_PROMPT,
-               # condition_on_previous_text=False,
-               # temperature=0.0,
-               # beam_size=BEAM_SIZE,
-               # best_of=BEST_OF,
-              #  patience=1.5,
-             #   suppress_blank=True
-            #)
-            
-            #text = result['text'].strip()
+    
 
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete = False) as tmp_file:
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
                     temp_wav_path = tmp_file.name
                     sf.write(temp_wav_path, audio_data, SAMPLE_RATE)
             
@@ -171,7 +161,7 @@ def transcriber_worker():
                         break
     
             finally:
-    # Clean up temp file
+                # Clean up temp file
                 if os.path.exists(temp_wav_path):
                     os.unlink(temp_wav_path)
 
