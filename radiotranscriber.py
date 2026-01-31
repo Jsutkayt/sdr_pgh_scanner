@@ -74,6 +74,48 @@ def write_json_log(entry):
     with open(JSONL_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
 
+def parse_filename(filename):
+    """
+    Parse filename format: YYYYMMDD_HHMMSS_ChannelName__TO_Channel.wav
+    Returns: (datetime_str, channel_name) or (None, None) if parsing fails
+    """
+    try:
+        # Remove file extension
+        name_without_ext = filename.rsplit('.', 1)[0]
+        
+        # Split by underscores
+        parts = name_without_ext.split('_')
+        
+        # Extract date and time (first two parts)
+        if len(parts) < 3:
+            return None, None
+            
+        date_str = parts[0]  # YYYYMMDD
+        time_str = parts[1]  # HHMMSS
+        
+        # Parse date and time
+        year = date_str[0:4]
+        month = date_str[4:6]
+        day = date_str[6:8]
+        hour = time_str[0:2]
+        minute = time_str[2:4]
+        second = time_str[4:6]
+        
+        datetime_str = f"{year}-{month}-{day} {hour}:{minute}:{second}"
+        
+        # Extract channel name (everything between time and __TO_)
+        remaining = '_'.join(parts[2:])
+        if '__TO_' in remaining:
+            channel_name = remaining.split('__TO_')[0]
+        else:
+            channel_name = remaining
+        
+        return datetime_str, channel_name
+        
+    except Exception as e:
+        print(f"   Warning: Could not parse filename '{filename}': {e}")
+        return None, None 
+    
 
 # --- INITIALIZATION --- 
 
@@ -122,6 +164,9 @@ def transcriber_worker():
                 break
             
             timestamp, audio_data, filename = item
+
+            # Parse filename for additional metadata
+            file_datetime, channel_name = parse_filename(filename)
 
             duration = len(audio_data) / SAMPLE_RATE
             print(f"Transcribing {filename} ({duration:.1f}s)...")
@@ -237,6 +282,8 @@ def transcriber_worker():
                 # ADDED - Log blocked entries to JSON
                 write_json_log({
                     "timestamp": timestamp,
+                    "file_datetime": file_datetime,
+                    "channel_name": channel_name,
                     "duration": round(duration, 1),
                     "filename": filename,
                     "text": None,
@@ -266,6 +313,8 @@ def transcriber_worker():
                 # ADDED - Build JSON entry
                 json_entry = {
                     "timestamp": timestamp,
+                    "file_datetime": file_datetime,
+                    "channel_name": channel_name,
                     "duration": round(duration, 1),
                     "filename": filename,
                     "text": text,
@@ -287,6 +336,8 @@ def transcriber_worker():
                 # ADDED - Log empty results to JSON
                 write_json_log({
                     "timestamp": timestamp,
+                    "file_datetime": file_datetime,
+                    "channel_name": channel_name,
                     "duration": round(duration, 1),
                     "filename": filename,
                     "text": None,
