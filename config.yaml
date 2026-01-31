@@ -1,17 +1,20 @@
 # config.yaml - Configuration for RadioTranscriber
 # Optimized for Mac CPU processing
 
-sdr:
-  description: "Pgh Fire Dispatch"
 
 feed_specific:
-  description: "Pgh_Fire"
+  description: "Pgh_Fire_and_Police"
   output_folder: "Pgh_Fire_SDR/"
 
 vad_and_silence:
   vad_aggressiveness: 1              # VAD sensitivity: 0=least aggressive, 3=most
   min_speech_seconds: 1.0            # Min audio length to transcribe
   silence_limit: 1.5                 # Seconds of silence to end recording
+
+whisper_backend:
+  cli_path: "/opt/homebrew/bin/whisper-cli"
+  model_path: "~/Developer/tools/whisper.cpp/models/ggml-large-v3.bin"
+
 
 tuning:
   model_size: "medium"                 # CHANGED: "base" for Mac speed (was "large-v3")
@@ -20,8 +23,8 @@ tuning:
     Transcript of Pittsburgh Fire Dispatch public safety radio. 
     Agencies: Fire, EMS. Common phrases: dispatch, central, on scene, 
     clear, received, responding, engine, ladder, ambulance.
-  beam_size: 1                       # CHANGED: 1 for speed (was 5)
-  best_of: 1                         # CHANGED: 1 for speed (was 5)
+  beam_size: 5                       
+  best_of: 5                        
   no_speech_threshold: 0.75
   normalization: 95
 

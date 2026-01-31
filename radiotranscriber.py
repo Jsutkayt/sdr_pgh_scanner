@@ -1,7 +1,7 @@
 
 import numpy as np
-import whisper
-import torch
+import subprocess
+import tempfile
 import datetime
 import time
 import queue
@@ -20,8 +20,7 @@ with open("config.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 # Extract config values
-SDR_DESCRIPTION = config["sdr"]["description"]
-FEED_DESCRIPTION = SDR_DESCRIPTION
+FEED_DESCRIPTION = config["feed_specific"]["description"]
 OUTPUT_FOLDER = config["feed_specific"]["output_folder"]
 
 MIN_SPEECH_SECONDS = config["vad_and_silence"]["min_speech_seconds"]
@@ -39,6 +38,10 @@ CUTOFF_PHRASES = config["post_generation_cleanup"]["cutoff_phrases"]
 UNIT_MAPPING = config["post_generation_cleanup"]["unit_mapping"]
 UNIT_PATTERN = config["post_generation_cleanup"]["unit_normalization"]["pattern"]
 UNIT_PREFIX = config["post_generation_cleanup"]["unit_normalization"]["prefix"]
+
+
+CLI_PATH = os.path.expanduser(config["whisper_backend"]["cli_path"])
+MODEL_PATH = os.path.expanduser(config["whisper_backend"]["model_path"])
 
 # --- SETTINGS ---
 SAMPLE_RATE = 16000
@@ -58,10 +61,10 @@ transcription_queue = queue.Queue()
 
 
 # --- INITIALIZATION --- Medium Model Works Best
-print(f"Loading Whisper model '{MODEL_SIZE}'...")
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model = whisper.load_model(MODEL_SIZE).to(device)
-print(f"Model loaded on {device}")
+#print(f"Loading Whisper model '{MODEL_SIZE}'...")
+#device = "cuda" if torch.cuda.is_available() else "cpu"
+#model = whisper.load_model(MODEL_SIZE).to(device)
+#print(f"Model loaded on {device}")
 
 print(f"Processing recordings from '{RECORDINGS_FOLDER}' folder")
 print(f"   Feed: {FEED_DESCRIPTION}")
@@ -98,8 +101,8 @@ def load_audio_file(filepath):
         print(f"   Error loading {filepath}: {e}")
         return None
 
-def transcriber_worker(model, device):
-    print(f"   [Worker] Transcriber thread started on {device}")
+def transcriber_worker():
+    print(f"   [Worker] Transcriber thread started")
     
     while True:
         try:
@@ -113,30 +116,70 @@ def transcriber_worker(model, device):
             print(f"Transcribing {filename} ({duration:.1f}s)...")
             transcribe_start = time.time()
             
-            result = model.transcribe(
-                audio_data,
-                language=LANGUAGE,
-                fp16=(device == "cuda"),
-                initial_prompt=INITIAL_PROMPT,
-                condition_on_previous_text=False,
-                temperature=0.0,
-                beam_size=BEAM_SIZE,
-                best_of=BEST_OF,
-                patience=1.5,
-                suppress_blank=True
-            )
+            #result = model.transcribe(
+               # audio_data,
+               # language=LANGUAGE,
+               # fp16=(device == "cuda"),
+               # initial_prompt=INITIAL_PROMPT,
+               # condition_on_previous_text=False,
+               # temperature=0.0,
+               # beam_size=BEAM_SIZE,
+               # best_of=BEST_OF,
+              #  patience=1.5,
+             #   suppress_blank=True
+            #)
             
-            text = result['text'].strip()
+            #text = result['text'].strip()
+
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete = False) as tmp_file:
+                    temp_wav_path = tmp_file.name
+                    sf.write(temp_wav_path, audio_data, SAMPLE_RATE)
+            
+            try:
+
+                cmd = [
+                    CLI_PATH,
+                    "-m", MODEL_PATH,  #large-v3
+                    "-f", temp_wav_path,
+                    "-l", LANGUAGE,
+                    "-bs", str(BEAM_SIZE),              # beam_size from config
+                    "-bo", str(BEST_OF),              # best_of from config  
+                    "-t", "4",               # threads
+                    "--prompt", INITIAL_PROMPT,  # Your detailed prompt
+                    "--temperature", "0.0",      # Deterministic output
+                    "-nt"
+                ]
+
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+               # Extract text from whisper.cpp output
+                output_lines = result.stdout.split('\n')
+                text = ""
+
+                # The transcription is after all the loading info
+                # Look for lines that don't start with common prefixes
+                for line in output_lines:
+                    line = line.strip()
+                    # Skip technical/metadata lines
+                    if not line:
+                        continue
+                    if line.startswith(('whisper_', 'ggml_', 'system_info:', 'main:', '[')):
+                        continue
+                    # This should be the transcription
+                    if line:
+                        text = line
+                        break
+    
+            finally:
+    # Clean up temp file
+                if os.path.exists(temp_wav_path):
+                    os.unlink(temp_wav_path)
+
+
             transcribe_time = time.time() - transcribe_start
             print(f"   Done in {transcribe_time:.1f}s")
 
             original_text = text
-
-            # No-speech prob filter
-            if result.get('no_speech_prob', 0) > NO_SPEECH_THRESHOLD:
-                print(f"   (Discarded non-speech segment: prob {result['no_speech_prob']:.2f})")
-                transcription_queue.task_done()
-                continue
 
             # Beep hallucination replacement
             if duration < 10.0:
@@ -220,7 +263,7 @@ def process_recordings():
     global LOG_FILE, CURRENT_LOG_DATE
     
     # Start transcriber worker thread
-    worker = threading.Thread(target=transcriber_worker, args=(model, device))
+    worker = threading.Thread(target=transcriber_worker)
     worker.daemon = True
     worker.start()
     

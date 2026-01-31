@@ -2,6 +2,22 @@
 
 This is a modified version of RadioTranscriber that processes pre-recorded audio files instead of streaming from an RTL-SDR device.
 
+- CMAKE, Whisper-Cpp
+## Setup
+
+1. Install whisper.cpp:
+```
+   git clone https://github.com/ggerganov/whisper.cpp.git
+   cd whisper.cpp
+   WHISPER_COREML=1 make -j
+```
+
+2. Download the model:
+```
+   bash models/download-ggml-model.sh medium.en
+```
+
+3. Run transcription...
 ## Key Changes
 
 ### What's Different:
