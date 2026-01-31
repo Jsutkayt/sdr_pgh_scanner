@@ -4,7 +4,7 @@
 
 feed_specific:
   description: "Pgh_Fire_and_Police"
-  output_folder: "Pgh_Fire_SDR/"
+  output_folder: "transcription_logs"
 
 vad_and_silence:
   vad_aggressiveness: 1              # VAD sensitivity: 0=least aggressive, 3=most

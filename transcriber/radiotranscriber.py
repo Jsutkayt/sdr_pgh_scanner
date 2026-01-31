@@ -14,11 +14,21 @@ import yaml
 import soundfile as sf
 from pathlib import Path
 import json
-import sys  # ADDED - needed for sys.exit()
+import sys  
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.join(script_dir, "config.yaml")
+
+repo_root = os.path.dirname(script_dir)
+OUTPUT_FOLDER = os.path.join(repo_root, "transcription_logs")
+
+# Make sure folder exists
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 # Load configuration
-with open("config.yaml", "r", encoding="utf-8") as f:
+with open(config_path, "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
+
 
 # Extract config values
 FEED_DESCRIPTION = config["feed_specific"]["description"]
