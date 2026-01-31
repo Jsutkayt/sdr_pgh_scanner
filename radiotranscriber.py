@@ -1,4 +1,3 @@
-
 import numpy as np
 import subprocess
 import tempfile
@@ -15,6 +14,7 @@ import yaml
 import soundfile as sf
 from pathlib import Path
 import json
+import sys  # ADDED - needed for sys.exit()
 
 # Load configuration
 with open("config.yaml", "r", encoding="utf-8") as f:
@@ -57,15 +57,22 @@ RECORDINGS_FOLDER = "recordings"  # Folder containing audio files
 
 BASE_LOG_FILENAME = f"transcription_{FEED_DESCRIPTION}"
 LOG_FILE = os.path.join(OUTPUT_FOLDER, f"{BASE_LOG_FILENAME}_{datetime.date.today()}.log")
-CURRENT_LOG_DATE = datetime.date.today()
+JSONL_FILE = os.path.join(OUTPUT_FOLDER, f"{BASE_LOG_FILENAME}_{datetime.date.today()}.jsonl")
 
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 if not os.path.exists(LOG_FILE):
     open(LOG_FILE, 'a').close()
+if not os.path.exists(JSONL_FILE):
+    open(JSONL_FILE, 'a').close()
 
 sos = signal.butter(5, 100 / (SAMPLE_RATE / 2), btype='high', output='sos')
 
 transcription_queue = queue.Queue()
+
+def write_json_log(entry):
+    """Write a JSON line to the JSONL file"""
+    with open(JSONL_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 # --- INITIALIZATION --- 
@@ -129,39 +136,34 @@ def transcriber_worker():
 
                 cmd = [
                     CLI_PATH,
-                    "-m", MODEL_PATH,  #large-v3
+                    "-m", MODEL_PATH,
                     "-f", temp_wav_path,
                     "-l", LANGUAGE,
-                    "-bs", str(BEAM_SIZE),              # beam_size from config
-                    "-bo", str(BEST_OF),              # best_of from config  
-                    "-t", "4",               # threads
-                    "--prompt", INITIAL_PROMPT,  # Your detailed prompt
-                    "--temperature", "0.0",      # Deterministic output
+                    "-bs", str(BEAM_SIZE),
+                    "-bo", str(BEST_OF),
+                    "-t", "4",
+                    "--prompt", INITIAL_PROMPT,
+                    "--temperature", "0.0",
                     "-nt"
                 ]
 
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
-               # Extract text from whisper.cpp output
+                # Extract text from whisper.cpp output
                 output_lines = result.stdout.split('\n')
                 text = ""
 
-                # The transcription is after all the loading info
-                # Look for lines that don't start with common prefixes
                 for line in output_lines:
                     line = line.strip()
-                    # Skip technical/metadata lines
                     if not line:
                         continue
                     if line.startswith(('whisper_', 'ggml_', 'system_info:', 'main:', '[')):
                         continue
-                    # This should be the transcription
                     if line:
                         text = line
                         break
     
             finally:
-                # Clean up temp file
                 if os.path.exists(temp_wav_path):
                     os.unlink(temp_wav_path)
 
@@ -170,6 +172,7 @@ def transcriber_worker():
             print(f"   Done in {transcribe_time:.1f}s")
 
             original_text = text
+            transforms = []
 
             # Beep hallucination replacement
             if duration < 10.0:
@@ -182,11 +185,13 @@ def transcriber_worker():
                 upper_text = text.upper()
                 if any(pattern in upper_text for pattern in beep_patterns) and len(text) > 10:
                     text = "[beeps]"
+                    transforms.append("beep_replacement")
                     print(f"   (Replaced alert tone: {original_text} → [beeps])")
 
             # Long single-char run → [noise]
             if re.search(r'([A-Z])\1{10,}', text.upper()):
                 text = "[noise]"
+                transforms.append("noise_replacement")
                 print(f"   (Replaced noise run: {original_text} → [noise])")
 
             # De-duplicate repeated unit calls
@@ -195,6 +200,7 @@ def transcriber_worker():
                 common = Counter(words).most_common(1)
                 if common and len(common[0][0]) <= 10 and common[0][1] > len(words) // 2:
                     text = common[0][0]
+                    transforms.append("deduplication")
                     print(f"   (De-duplicated repetition: {original_text} → {text})")
 
             # Map spoken numbers to letter units
@@ -202,6 +208,7 @@ def transcriber_worker():
             for spoken, letter in UNIT_MAPPING.items():
                 if spoken in lower_text:
                     text = re.sub(re.escape(spoken), letter, text, flags=re.IGNORECASE)
+                    transforms.append(f"unit_mapping:{spoken}")
                     print(f"   (Mapped unit: {original_text} → {text})")
 
             # Normalize hyphens in unit IDs
@@ -210,25 +217,44 @@ def transcriber_worker():
                 num = match.group(2)
                 return f"{UNIT_PREFIX}{letter}{num}"
             
-            text = re.sub(UNIT_PATTERN, normalize_unit, text, flags=re.IGNORECASE)
-            if text != original_text:
+            normalized_text = re.sub(UNIT_PATTERN, normalize_unit, text, flags=re.IGNORECASE)
+            if normalized_text != text:
+                text = normalized_text
+                transforms.append("unit_normalization")
                 print(f"   (Normalized units: {original_text} → {text})")
 
             lower_text = text.lower()
             blocked = False
+            blocked_phrase = None  # MOVED - now before the loop
             for phrase in FULL_BLOCK_PHRASES:
                 if phrase.lower() in lower_text:
                     print(f"   (Blocked hallucination containing '{phrase}': {text})")
                     blocked = True
+                    blocked_phrase = phrase  # ADDED - track which phrase blocked it
                     break
+            
             if blocked:
+                # ADDED - Log blocked entries to JSON
+                write_json_log({
+                    "timestamp": timestamp,
+                    "duration": round(duration, 1),
+                    "filename": filename,
+                    "text": None,
+                    "original": original_text,
+                    "blocked": True,
+                    "blocked_reason": blocked_phrase,
+                    "transcription_time": round(transcribe_time, 1)
+                })
                 transcription_queue.task_done()
                 continue
 
+            cutoff_phrase = None  # ADDED
             for phrase in CUTOFF_PHRASES:
                 idx = lower_text.find(phrase.lower())
                 if idx != -1:
                     text = text[:idx].strip()
+                    cutoff_phrase = phrase  # ADDED
+                    transforms.append(f"cutoff:{phrase}")  # ADDED
                     print(f"   (Truncated hallucinated phrase '{phrase}': {original_text})")
                     break
 
@@ -237,12 +263,37 @@ def transcriber_worker():
             text = re.sub(keywords, lambda m: m.group(0).title(), text, flags=re.I)
 
             if text:
+                # ADDED - Build JSON entry
+                json_entry = {
+                    "timestamp": timestamp,
+                    "duration": round(duration, 1),
+                    "filename": filename,
+                    "text": text,
+                    "original": original_text if text != original_text else None,
+                    "transforms": transforms,
+                    "transcription_time": round(transcribe_time, 1)
+                }
+                
+                # Write human-readable log
                 output = f"[{timestamp}] ({duration:.1f}s) [{filename}] {text}"
                 print(output)
                 with open(LOG_FILE, "a", encoding="utf-8") as f:
                     f.write(output + "\n")
+                
+                # ADDED - Write JSON log
+                write_json_log(json_entry)
             else:
                 print(f"   (Empty after cleanup — discarded)")
+                # ADDED - Log empty results to JSON
+                write_json_log({
+                    "timestamp": timestamp,
+                    "duration": round(duration, 1),
+                    "filename": filename,
+                    "text": None,
+                    "original": original_text,
+                    "empty_after_cleanup": True,
+                    "transcription_time": round(transcribe_time, 1)
+                })
 
             transcription_queue.task_done()
 
@@ -250,7 +301,7 @@ def transcriber_worker():
             print(f"Error in transcriber: {e}")
 
 def process_recordings():
-    global LOG_FILE, CURRENT_LOG_DATE
+    global LOG_FILE  # REMOVED CURRENT_LOG_DATE
     
     # Start transcriber worker thread
     worker = threading.Thread(target=transcriber_worker)
@@ -283,8 +334,15 @@ def process_recordings():
     print("=" * 60)
     
     start_timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    # Human-readable log
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"\n[{start_timestamp}] [STARTED] Batch transcription - {len(audio_files)} files\n")
+    # ADDED - JSON log
+    write_json_log({
+        "timestamp": start_timestamp,
+        "event": "batch_start",
+        "files": len(audio_files)
+    })
     
     try:
         for idx, filepath in enumerate(audio_files, 1):
@@ -335,10 +393,17 @@ def process_recordings():
         
         stop_timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         print(f"\n[{stop_timestamp}] [COMPLETED] Batch transcription finished")
+        # Human-readable log
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{stop_timestamp}] [COMPLETED] Batch transcription finished\n")
+        # ADDED - JSON log
+        write_json_log({
+            "timestamp": stop_timestamp,
+            "event": "batch_end"
+        })
         
         print(f"\nTranscriptions saved to: {LOG_FILE}")
+        print(f"JSON data saved to: {JSONL_FILE}")  # ADDED
 
 if __name__ == "__main__":
     process_recordings()
