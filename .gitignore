@@ -1,0 +1,12 @@
+.env
+
+Pgh_Fire_SDR/
+recordings/
+
+*.wav
+*.log
+*.jsonl
+
+__pycache__/
+*.pyc
+

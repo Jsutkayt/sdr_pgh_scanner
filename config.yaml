@@ -17,7 +17,6 @@ whisper_backend:
 
 
 tuning:
-  model_size: "medium"                 # CHANGED: "base" for Mac speed (was "large-v3")
   language: "en"
   initial_prompt: >-
     Transcript of Pittsburgh Fire Dispatch public safety radio. 
